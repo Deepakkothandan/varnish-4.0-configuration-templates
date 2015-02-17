@@ -55,13 +55,14 @@ sub vcl_recv {
 
 	set req.backend_hint = vdir.backend(); # send all traffic to the vdir director
 
-	if (req.restarts == 0) {
-		if (req.http.X-Forwarded-For) { # set or append the client.ip to X-Forwarded-For header
-			set req.http.X-Forwarded-For = req.http.X-Forwarded-For + ", " + client.ip;
-		} else {
-			set req.http.X-Forwarded-For = client.ip;
-		}
-	}
+	# Not needed now
+#	if (req.restarts == 0) {
+#		if (req.http.X-Forwarded-For) { # set or append the client.ip to X-Forwarded-For header
+#			set req.http.X-Forwarded-For = req.http.X-Forwarded-For + ", " + client.ip;
+#		} else {
+#			set req.http.X-Forwarded-For = client.ip;
+#		}
+#	}
 
 	# Normalize the header, remove the port (in case you're testing this on various TCP ports)
 	set req.http.Host = regsub(req.http.Host, ":[0-9]+", "");
@@ -69,7 +70,12 @@ sub vcl_recv {
 	# Normalize the query arguments
 	set req.url = std.querysort(req.url);
 
-	# Allow purging
+	# Sample permanent redirect
+	#if (req.http.host ~ "^www.example.com$") {
+	#	return(synth(720, "http://example.com" + req.url));
+	#}
+
+	# Allow purging & other non-standar methods to evict cache contents
 	if (req.method == "PURGE") {
 		if (!client.ip ~ purge) { # purge is the ACL defined at the begining
 			# Not from an allowed IP? Then die with an error.
@@ -78,6 +84,30 @@ sub vcl_recv {
 		# If you got this stage (and didn't error out above), purge the cached result
 		return (purge);
 	}
+
+        if (req.request == "REFRESH") {
+		if (!client.ip ~ purge) { # purge is the ACL defined at the begining
+			# Not from an allowed IP? Then die with an error.
+			return (synth(405, "This IP is not allowed to send REFRESH requests."));
+		}
+		# If you got this stage (and didn't error out above), purge the cached result
+                set req.request = "GET";
+                set req.hash_always_miss = true;
+        }
+
+	if (req.request == "BAN") {
+	# See https://www.varnish-software.com/static/book/Cache_invalidation.html#smart-bans
+		if (!client.ip ~ purge) { # purge is the ACL defined at the begining
+			# Not from an allowed IP? Then die with an error.
+			return (synth(405, "This IP is not allowed to send BAN requests."));
+		}
+		# If you got this stage (and didn't error out above), purge the cached result
+
+                ban("obj.http.x-url ~ " + req.http.x-ban-url +
+                    " && obj.http.x-host ~ " + req.http.x-ban-host);
+                error 200 "Banned";
+        }
+
 
 	# Only deal with "normal" types
 	if (req.method != "GET" &&
@@ -302,6 +332,10 @@ sub vcl_miss {
 sub vcl_backend_response {
 # Called after the response headers has been successfully retrieved from the backend.
 
+	# Add headers to allow smart bans
+	set beresp.http.x-url = req.url;
+	set beresp.http.x-host = req.http.host;
+
 	# Pause ESI request and remove Surrogate-Control header
 	if (beresp.http.Surrogate-Control ~ "ESI/1.0") {
 		unset beresp.http.Surrogate-Control;
@@ -355,6 +389,10 @@ sub vcl_backend_response {
 sub vcl_deliver {
 # Called before a cached object is delivered to the client.
 
+	# Remove the headers that allow smart bans before sending to client
+	unset resp.http.x-url;
+	unset resp.http.x-host;
+
 	if (obj.hits > 0) { # Add debug header to see if it's a HIT/MISS and the number of hits, disable when not needed
 		set resp.http.X-Cache = "HIT";
 	} else {
@@ -379,23 +417,21 @@ sub vcl_deliver {
 }
 
 sub vcl_purge {
-    # restart request
-    set req.http.X-Purge = "Yes";
-    return(restart);
+    # return (synth(200, "Purged")); # by default in builtin.vcl
 }
 
 sub vcl_synth {
 	if (resp.status == 720) {
 		# We use this special error status 720 to force redirects with 301 (permanent) redirects
-		# To use this, call the following from anywhere in vcl_recv: error 720 "http://host/new.html"
-		set resp.status = 301;
+		# To use this, call the following from anywhere in vcl_recv: return(synth(720, "http://host/new.html")
 		set resp.http.Location = resp.reason;
+		set resp.status = 301; # Be careful to set it after using resp.reason or it'll overwrite it
 		return (deliver);
 	} elseif (resp.status == 721) {
 		# And we use error status 721 to force redirects with a 302 (temporary) redirect
-		# To use this, call the following from anywhere in vcl_recv: error 720 "http://host/new.html"
-		set resp.status = 302;
+		# To use this, call the following from anywhere in vcl_recv: return(synth(721, "http://host/new.html")
 		set resp.http.Location = resp.reason;
+		set resp.status = 302; # Be careful to set it after using resp.reason or it'll overwrite it
 		return (deliver);
 	}
 
