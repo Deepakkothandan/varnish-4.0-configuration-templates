@@ -85,17 +85,17 @@ sub vcl_recv {
 		return (purge);
 	}
 
-        if (req.request == "REFRESH") {
+        if (req.method == "REFRESH") {
 		if (!client.ip ~ purge) { # purge is the ACL defined at the begining
 			# Not from an allowed IP? Then die with an error.
 			return (synth(405, "This IP is not allowed to send REFRESH requests."));
 		}
 		# If you got this stage (and didn't error out above), purge the cached result
-                set req.request = "GET";
+                set req.method = "GET";
                 set req.hash_always_miss = true;
         }
 
-	if (req.request == "BAN") {
+	if (req.method == "BAN") {
 	# See https://www.varnish-software.com/static/book/Cache_invalidation.html#smart-bans
 		if (!client.ip ~ purge) { # purge is the ACL defined at the begining
 			# Not from an allowed IP? Then die with an error.
@@ -105,7 +105,8 @@ sub vcl_recv {
 
                 ban("obj.http.x-url ~ " + req.http.x-ban-url +
                     " && obj.http.x-host ~ " + req.http.x-ban-host);
-                error 200 "Banned";
+                return (synth(200, "Banned"));
+
         }
 
 
@@ -333,8 +334,8 @@ sub vcl_backend_response {
 # Called after the response headers has been successfully retrieved from the backend.
 
 	# Add headers to allow smart bans
-	set beresp.http.x-url = req.url;
-	set beresp.http.x-host = req.http.host;
+	set beresp.http.x-url = bereq.url;
+	set beresp.http.x-host = bereq.http.host;
 
 	# Pause ESI request and remove Surrogate-Control header
 	if (beresp.http.Surrogate-Control ~ "ESI/1.0") {
